@@ -1,0 +1,47 @@
+# Python virtual environment
+venv/
+env/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment variables
+.env
+.env.local
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Logs
+*.log
+logs/
+
+# Local development settings
+*.sqlite3
+*.db
+
+# Streamlit specific
+.streamlit/
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Project specific
+# Add any project-specific files or directories to ignore
