@@ -5,6 +5,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+class CacheConfig(BaseModel):
+    """Configuration for prompt caching."""
+    enabled: bool = True
+    min_cache_size: int = Field(
+        default=1024,
+        description="Minimum content size in characters to trigger caching"
+    )
+    cache_system_messages: bool = Field(
+        default=True,
+        description="Whether to cache system messages"
+    )
+    cache_user_messages: bool = Field(
+        default=True,
+        description="Whether to cache user messages"
+    )
+
 class LLMConfig(BaseModel):
     """Configuration for individual LLM modules with comprehensive parameter support."""
     # Required parameters
@@ -36,6 +52,9 @@ class LLMConfig(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     
+    # Caching configuration
+    cache_config: CacheConfig = Field(default_factory=CacheConfig)
+    
     # Extra configuration
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
@@ -49,7 +68,7 @@ class LLMConfig(BaseModel):
         """Convert config to API request parameters."""
         params = {
             k: v for k, v in self.model_dump().items()
-            if v is not None and k not in ['provider', 'api_key', 'extra_config']
+            if v is not None and k not in ['provider', 'api_key', 'extra_config', 'cache_config']
         }
         
         # Remove empty optional parameters
