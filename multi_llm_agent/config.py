@@ -1,5 +1,5 @@
-from typing import Optional, Dict
-from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
 import os
 from dotenv import load_dotenv
 
@@ -7,12 +7,12 @@ load_dotenv()
 
 class LLMConfig(BaseModel):
     """Configuration for individual LLM modules."""
-    provider: str  # 'openai', 'openrouter'
+    provider: str  # 'openai', 'openrouter', 'anthropic'
     model: str
     temperature: float = 0.7
     max_tokens: int = 1000
     api_key: Optional[str] = None
-    extra_config: Dict[str, str] = {}
+    extra_config: Dict[str, Any] = Field(default_factory=dict)
 
 class AgentConfig(BaseModel):
     """Configuration for the entire agent system."""
@@ -22,46 +22,33 @@ class AgentConfig(BaseModel):
 
 def create_default_config() -> AgentConfig:
     """Create a default configuration using environment variables."""
-    openai_key = os.getenv("OPENAI_API_KEY")
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    site_url = os.getenv("SITE_URL", "")
-    app_name = os.getenv("APP_NAME", "MultiLLMAgent")
-    
-    # Common OpenRouter config
-    openrouter_extra = {
-        "site_url": site_url,
-        "app_name": app_name
+    # Common OpenRouter settings
+    openrouter_settings = {
+        "provider": "openrouter",
+        "api_key": os.getenv("OPENROUTER_API_KEY"),
+        "extra_config": {
+            "site_url": os.getenv("SITE_URL"),
+            "app_name": os.getenv("APP_NAME", "MultiLLMAgent")
+        }
     }
-    
-    # Reasoning module uses OpenRouter with GPT-4 preview
-    reasoning_config = LLMConfig(
-        provider="openrouter",
-        model="openai/o1-preview-2024-09-12",
-        temperature=0.7,
-        api_key=openrouter_key,
-        extra_config=openrouter_extra
-    )
-    
-    # Planner uses Claude-3.5-sonnet through OpenRouter
-    planner_config = LLMConfig(
-        provider="openrouter",
-        model="anthropic/claude-3.5-sonnet:beta",
-        temperature=0.5,
-        api_key=openrouter_key,
-        extra_config=openrouter_extra
-    )
-    
-    # Executor uses Claude-3.5-haiku through OpenRouter
-    executor_config = LLMConfig(
-        provider="openrouter",
-        model="anthropic/claude-3-5-haiku:beta",
-        temperature=0.8,
-        api_key=openrouter_key,
-        extra_config=openrouter_extra
-    )
-    
+
     return AgentConfig(
-        reasoning_config=reasoning_config,
-        planner_config=planner_config,
-        executor_config=executor_config
+        reasoning_config=LLMConfig(
+            **openrouter_settings,
+            model="openai/gpt-4-vision-preview",  # Supports multimodal
+            temperature=0.7,
+            max_tokens=1000,
+        ),
+        planner_config=LLMConfig(
+            **openrouter_settings,
+            model="anthropic/claude-3-sonnet",  # Good for planning
+            temperature=0.5,
+            max_tokens=2000,
+        ),
+        executor_config=LLMConfig(
+            **openrouter_settings,
+            model="anthropic/claude-3-haiku",  # Fast and efficient
+            temperature=0.3,
+            max_tokens=1500,
+        )
     )
