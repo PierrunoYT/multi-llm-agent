@@ -1,8 +1,10 @@
-openai==1.3.0
-anthropic==0.3.11
-python-dotenv==1.0.0
-pydantic==2.5.2
-typing-extensions==4.8.0
-colorama==0.4.6
-streamlit==1.32.0
-asyncio==3.4.3
+openai>=1.0.0
+anthropic>=0.7.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+aiohttp>=3.9.0
+python-multipart>=0.0.6  # For handling multipart form data (images)
+typing-extensions>=4.8.0
+colorama>=0.4.6
+streamlit>=1.32.0
+asyncio>=3.4.3
