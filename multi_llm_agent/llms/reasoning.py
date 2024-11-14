@@ -87,10 +87,8 @@ class ReasoningModule:
 
         # Prepare the completion request
         request_kwargs = {
-            "model": self.config.model,
+            **self.config.to_request_params(),  # Include all configured parameters
             "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
             "stream": stream
         }
 
