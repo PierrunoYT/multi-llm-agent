@@ -1,6 +1,6 @@
 import asyncio
-from multi_llm_agent.config import create_default_config
-from multi_llm_agent.agent import MultiLLMAgent
+from config import create_default_config
+from agent import MultiLLMAgent
 
 async def main():
     # Create the agent with default configuration
@@ -15,8 +15,8 @@ async def main():
     })
     
     # Example task
-    task = """Create a simple web scraping script that extracts article titles 
-    from a news website and saves them to a CSV file."""
+    task = """Analyze this multi-LLM agent architecture and suggest improvements 
+    for better error handling, caching, and modularity."""
     
     # Process the task
     response = await agent.process(task)

@@ -1,6 +1,22 @@
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 
+class BaseLLMError(Exception):
+    """Base exception class for LLM module errors."""
+    pass
+
+class ReasoningError(BaseLLMError):
+    """Exception raised for errors in the reasoning module."""
+    pass
+
+class PlannerError(BaseLLMError):
+    """Exception raised for errors in the planner module."""
+    pass
+
+class ExecutorError(BaseLLMError):
+    """Exception raised for errors in the executor module."""
+    pass
+
 class ModerationErrorMetadata(BaseModel):
     """Metadata for moderation errors from OpenRouter."""
     reasons: List[str] = Field(description="Why the input was flagged")

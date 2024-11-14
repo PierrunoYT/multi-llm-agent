@@ -1,9 +1,9 @@
 from typing import Dict, List, Optional
 from pydantic import BaseModel
-from .llms.reasoning import ReasoningModule
-from .llms.planner import PlannerModule
-from .llms.executor import ExecutorModule
-from .config import AgentConfig
+from llms.reasoning import ReasoningModule
+from llms.planner import PlannerModule
+from llms.executor import ExecutorModule
+from config import AgentConfig
 
 class AgentResponse(BaseModel):
     thought_process: str

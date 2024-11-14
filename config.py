@@ -70,7 +70,7 @@ class AgentConfig(BaseModel):
 # Default configurations for each module
 REASONING_CONFIG = LLMConfig(
     model="openai/o1-preview",
-    api_key="${OPENROUTER_API_KEY}",
+    api_key=os.getenv("OPENROUTER_API_KEY", ""),
     temperature=0.7,
     cache_config=CacheConfig(
         enabled=True,
@@ -79,14 +79,14 @@ REASONING_CONFIG = LLMConfig(
         min_cache_size=100
     ),
     extra_config={
-        "site_url": "${SITE_URL}",
+        "site_url": os.getenv("SITE_URL", "https://example.com"),
         "app_name": "Multi-LLM Agent"
     }
 )
 
 PLANNING_CONFIG = LLMConfig(
     model="anthropic/claude-3.5-sonnet:beta",
-    api_key="${OPENROUTER_API_KEY}",
+    api_key=os.getenv("OPENROUTER_API_KEY", ""),
     temperature=0.7,
     cache_config=CacheConfig(
         enabled=True,
@@ -95,14 +95,14 @@ PLANNING_CONFIG = LLMConfig(
         min_cache_size=100
     ),
     extra_config={
-        "site_url": "${SITE_URL}",
+        "site_url": os.getenv("SITE_URL", "https://example.com"),
         "app_name": "Multi-LLM Agent"
     }
 )
 
 EXECUTOR_CONFIG = LLMConfig(
     model="anthropic/claude-3-5-haiku:beta",
-    api_key="${OPENROUTER_API_KEY}",
+    api_key=os.getenv("OPENROUTER_API_KEY", ""),
     temperature=0.5,  # Lower temperature for more deterministic execution
     cache_config=CacheConfig(
         enabled=True,
@@ -111,7 +111,7 @@ EXECUTOR_CONFIG = LLMConfig(
         min_cache_size=100
     ),
     extra_config={
-        "site_url": "${SITE_URL}",
+        "site_url": os.getenv("SITE_URL", "https://example.com"),
         "app_name": "Multi-LLM Agent"
     }
 )
