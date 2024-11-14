@@ -1,86 +1,63 @@
-from typing import Optional, Dict, Any, List, Union
-from pydantic import BaseModel, Field, field_validator
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
 import os
 from dotenv import load_dotenv
+from dataclasses import dataclass, field
 
 load_dotenv()
 
-class CacheConfig(BaseModel):
-    """Configuration for prompt caching."""
+@dataclass
+class CacheConfig:
     enabled: bool = True
-    min_cache_size: int = Field(
-        default=1024,
-        description="Minimum content size in characters to trigger caching"
-    )
-    cache_system_messages: bool = Field(
-        default=True,
-        description="Whether to cache system messages"
-    )
-    cache_user_messages: bool = Field(
-        default=True,
-        description="Whether to cache user messages"
-    )
+    cache_system_messages: bool = True
+    cache_user_messages: bool = True
+    min_cache_size: int = 100
+    ttl_seconds: int = 300  # 5 minutes
 
-class LLMConfig(BaseModel):
-    """Configuration for individual LLM modules with comprehensive parameter support."""
-    # Required parameters
-    provider: str  # 'openai', 'openrouter', 'anthropic'
+@dataclass
+class LLMConfig:
     model: str
-    api_key: Optional[str] = None
-    
-    # Generation parameters
-    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
-    top_p: float = Field(default=1.0, gt=0.0, le=1.0)
-    top_k: int = Field(default=0, ge=0)
-    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
-    repetition_penalty: float = Field(default=1.0, gt=0.0, le=2.0)
-    min_p: float = Field(default=0.0, ge=0.0, le=1.0)
-    top_a: float = Field(default=0.0, ge=0.0, le=1.0)
-    seed: Optional[int] = None
-    max_tokens: Optional[int] = Field(default=None, gt=0)
-    
-    # Advanced parameters
-    logit_bias: Dict[int, float] = Field(
-        default_factory=dict,
-        description="Token ID to bias value mapping (-100 to 100)"
-    )
-    logprobs: bool = False
-    top_logprobs: Optional[int] = Field(default=None, ge=0, le=20)
-    response_format: Optional[Dict[str, str]] = None
-    stop: Optional[List[str]] = None
-    tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
-    
-    # Caching configuration
-    cache_config: CacheConfig = Field(default_factory=CacheConfig)
-    
-    # Extra configuration
-    extra_config: Dict[str, Any] = Field(default_factory=dict)
+    api_key: str
+    provider: str = "openrouter"
+    temperature: float = 0.7
+    max_tokens: Optional[int] = None
+    top_p: float = 1.0
+    top_k: Optional[int] = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    cache_config: CacheConfig = field(default_factory=CacheConfig)
+    extra_config: Dict[str, Any] = field(default_factory=dict)
 
-    @field_validator('tool_choice')
-    def validate_tool_choice(cls, v):
-        if isinstance(v, str) and v not in ['none', 'auto', 'required']:
-            raise ValueError("tool_choice string must be 'none', 'auto', or 'required'")
-        return v
+    def __post_init__(self):
+        # Validate temperature
+        if not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        
+        # Validate top_p
+        if not 0.0 <= self.top_p <= 1.0:
+            raise ValueError("Top-p must be between 0.0 and 1.0")
+        
+        # Validate penalties
+        if not -2.0 <= self.presence_penalty <= 2.0:
+            raise ValueError("Presence penalty must be between -2.0 and 2.0")
+        if not -2.0 <= self.frequency_penalty <= 2.0:
+            raise ValueError("Frequency penalty must be between -2.0 and 2.0")
 
     def to_request_params(self) -> Dict[str, Any]:
-        """Convert config to API request parameters."""
         params = {
-            k: v for k, v in self.model_dump().items()
-            if v is not None and k not in ['provider', 'api_key', 'extra_config', 'cache_config']
+            "model": self.model,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
         
-        # Remove empty optional parameters
-        if not params.get('logit_bias'):
-            params.pop('logit_bias', None)
-        if not params.get('tools'):
-            params.pop('tools', None)
-            params.pop('tool_choice', None)
-        if not params.get('response_format'):
-            params.pop('response_format', None)
-        if not params.get('stop'):
-            params.pop('stop', None)
+        if self.max_tokens is not None:
+            params["max_tokens"] = self.max_tokens
+        if self.top_k is not None:
+            params["top_k"] = self.top_k
+        if self.presence_penalty != 0:
+            params["presence_penalty"] = self.presence_penalty
+        if self.frequency_penalty != 0:
+            params["frequency_penalty"] = self.frequency_penalty
             
         return params
 
@@ -90,41 +67,59 @@ class AgentConfig(BaseModel):
     planner_config: LLMConfig
     executor_config: LLMConfig
 
+# Default configurations for each module
+REASONING_CONFIG = LLMConfig(
+    model="openai/o1-preview",
+    api_key="${OPENROUTER_API_KEY}",
+    temperature=0.7,
+    cache_config=CacheConfig(
+        enabled=True,
+        cache_system_messages=True,
+        cache_user_messages=True,
+        min_cache_size=100
+    ),
+    extra_config={
+        "site_url": "${SITE_URL}",
+        "app_name": "Multi-LLM Agent"
+    }
+)
+
+PLANNING_CONFIG = LLMConfig(
+    model="anthropic/claude-3.5-sonnet:beta",
+    api_key="${OPENROUTER_API_KEY}",
+    temperature=0.7,
+    cache_config=CacheConfig(
+        enabled=True,
+        cache_system_messages=True,
+        cache_user_messages=True,
+        min_cache_size=100
+    ),
+    extra_config={
+        "site_url": "${SITE_URL}",
+        "app_name": "Multi-LLM Agent"
+    }
+)
+
+EXECUTOR_CONFIG = LLMConfig(
+    model="anthropic/claude-3-5-haiku:beta",
+    api_key="${OPENROUTER_API_KEY}",
+    temperature=0.5,  # Lower temperature for more deterministic execution
+    cache_config=CacheConfig(
+        enabled=True,
+        cache_system_messages=True,
+        cache_user_messages=True,
+        min_cache_size=100
+    ),
+    extra_config={
+        "site_url": "${SITE_URL}",
+        "app_name": "Multi-LLM Agent"
+    }
+)
+
 def create_default_config() -> AgentConfig:
     """Create a default configuration using environment variables."""
-    # Common OpenRouter settings
-    openrouter_settings = {
-        "provider": "openrouter",
-        "api_key": os.getenv("OPENROUTER_API_KEY"),
-        "extra_config": {
-            "site_url": os.getenv("SITE_URL"),
-            "app_name": os.getenv("APP_NAME", "MultiLLMAgent")
-        }
-    }
-
     return AgentConfig(
-        reasoning_config=LLMConfig(
-            **openrouter_settings,
-            model="openai/gpt-4-vision-preview",  # Supports multimodal
-            temperature=0.7,  # Balanced creativity
-            max_tokens=1000,
-            presence_penalty=0.1,  # Slight penalty for repetition
-            frequency_penalty=0.1,  # Slight penalty for frequency
-        ),
-        planner_config=LLMConfig(
-            **openrouter_settings,
-            model="anthropic/claude-3-sonnet",  # Good for planning
-            temperature=0.5,  # More focused
-            max_tokens=2000,
-            top_p=0.9,  # Slightly more constrained
-            presence_penalty=0.2,  # Higher penalty for repetition in plans
-        ),
-        executor_config=LLMConfig(
-            **openrouter_settings,
-            model="anthropic/claude-3-haiku",  # Fast and efficient
-            temperature=0.3,  # More deterministic
-            max_tokens=1500,
-            top_k=40,  # Limit token choices for more focused output
-            repetition_penalty=1.2,  # Higher penalty for repetition in execution
-        )
+        reasoning_config=REASONING_CONFIG,
+        planner_config=PLANNING_CONFIG,
+        executor_config=EXECUTOR_CONFIG
     )
