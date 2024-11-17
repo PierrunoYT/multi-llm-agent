@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, Any, Union
 import asyncio
+import aiohttp
 from config import LLMConfig
 from .base import BaseLLMModule
 from .cache_control import (
@@ -8,7 +9,7 @@ from .cache_control import (
     cache_response,
     get_cached_response
 )
-from .errors import ReasoningError
+from .errors import ReasoningError, raise_for_status_code
 from .image_handler import ImageHandler
 from .rate_limiter import get_rate_limiter
 
@@ -162,6 +163,31 @@ class ReasoningModule(BaseLLMModule):
         """Create the reasoning prompt with context."""
         context_str = "\n".join(f"{k}: {v}" for k, v in self.context.items())
         return f"Context:\n{context_str}\n\nAnalyze this: {input_text}"
+    
+    async def _execute_api_call(self, request_kwargs: dict) -> Any:
+        """Execute API call to OpenRouter."""
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                **request_kwargs.get("extra_headers", {})
+            }
+            
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": request_kwargs["model"],
+                    "messages": request_kwargs["messages"],
+                    "stream": request_kwargs.get("stream", False),
+                    **{k: v for k, v in request_kwargs.items() if k not in ["extra_headers", "model", "messages", "stream"]}
+                }
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise_for_status_code(response.status, error_text)
+                    
+                return await response.json()
     
     async def _make_api_call_with_backoff(self, request_kwargs: dict, error_prefix: str, max_retries: int, retry_delay: float):
         """Make API call with exponential backoff retry strategy."""

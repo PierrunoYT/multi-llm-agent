@@ -1,10 +1,11 @@
 from typing import Dict, Any, Optional
 import asyncio
 import json
-from abc import ABC, abstractmethod
+import aiohttp
+from abc import ABC
 from pydantic import BaseModel, ValidationError
 from config import LLMConfig
-from .errors import LLMError, ValidationError as LLMValidationError
+from .errors import LLMError, ValidationError as LLMValidationError, raise_for_status_code
 
 class APIResponse(BaseModel):
     """Validated API response structure."""
@@ -67,7 +68,7 @@ class BaseLLMModule(ABC):
             # Validate request parameters
             self._validate_request_params(request_kwargs)
             
-            # Make the API call (implementation specific to provider)
+            # Make the API call
             response = await self._execute_api_call(request_kwargs)
             
             # Validate response
@@ -121,18 +122,30 @@ class BaseLLMModule(ABC):
         except (json.JSONDecodeError, ValidationError) as e:
             raise LLMValidationError(f"Invalid API response format: {str(e)}")
     
-    @abstractmethod
     async def _execute_api_call(self, request_kwargs: dict) -> Any:
-        """
-        Execute the actual API call. Must be implemented by provider-specific classes.
-        
-        Args:
-            request_kwargs: API request parameters
+        """Execute API call to OpenRouter."""
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                **request_kwargs.get("extra_headers", {})
+            }
             
-        Returns:
-            Raw API response
-        """
-        raise NotImplementedError("API call execution not implemented")
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": request_kwargs["model"],
+                    "messages": request_kwargs["messages"],
+                    "stream": request_kwargs.get("stream", False),
+                    **{k: v for k, v in request_kwargs.items() if k not in ["extra_headers", "model", "messages", "stream"]}
+                }
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise_for_status_code(response.status, error_text)
+                    
+                return await response.json()
     
     def add_context(self, context: Dict[str, str]):
         """Add context for the module."""
