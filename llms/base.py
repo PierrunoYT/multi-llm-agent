@@ -26,7 +26,14 @@ class BaseLLMModule(ABC):
         """Initialize the LLM module with configuration."""
         self.config = config
         self.context: Dict[str, str] = {}
+        self._session: Optional[aiohttp.ClientSession] = None
         self._validate_config()
+        
+    async def cleanup(self):
+        """Cleanup resources."""
+        if self._session:
+            await self._session.close()
+            self._session = None
     
     def _validate_config(self):
         """Validate the module configuration."""
@@ -47,7 +54,8 @@ class BaseLLMModule(ABC):
         request_kwargs: dict,
         error_prefix: str,
         max_retries: int = 1,
-        retry_delay: float = 1.0
+        retry_delay: float = 1.0,
+        timeout: float = 30.0
     ) -> Any:
         """
         Make an API call with validation and error handling.
@@ -68,8 +76,26 @@ class BaseLLMModule(ABC):
             # Validate request parameters
             self._validate_request_params(request_kwargs)
             
-            # Make the API call
-            response = await self._execute_api_call(request_kwargs)
+            attempts = 0
+            last_error = None
+            
+            while attempts <= max_retries:
+                try:
+                    response = await asyncio.wait_for(
+                        self._execute_api_call(request_kwargs),
+                        timeout=timeout
+                    )
+                    return self._validate_response(response)
+                except asyncio.TimeoutError:
+                    last_error = LLMError(f"{error_prefix}: Request timed out after {timeout} seconds")
+                except Exception as e:
+                    last_error = e
+                
+                attempts += 1
+                if attempts <= max_retries:
+                    await asyncio.sleep(retry_delay * attempts)
+            
+            raise last_error or LLMError(f"{error_prefix}: All retry attempts failed")
             
             # Validate response
             return self._validate_response(response)

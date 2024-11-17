@@ -82,7 +82,7 @@ def get_cache_expiration(provider: str) -> timedelta:
     minutes = CACHE_EXPIRATION.get(provider, CACHE_EXPIRATION["default"])
     return timedelta(minutes=minutes)
 
-def create_cache_key(content: str, role: str, model: str) -> str:
+def create_cache_key(content: str, role: str, model: str, **kwargs: Any) -> str:
     """
     Create a unique cache key for a message.
     
@@ -90,17 +90,22 @@ def create_cache_key(content: str, role: str, model: str) -> str:
         content: The message content
         role: The message role
         model: The model being used
+        **kwargs: Additional key components
         
     Returns:
         str: The cache key
     """
+    # Normalize content by removing extra whitespace
+    normalized_content = " ".join(content.split())
+    
     key_data = {
-        "content": content,
-        "role": role,
-        "model": model
+        "content": normalized_content,
+        "role": role.lower(),
+        "model": model.lower(),
+        **kwargs
     }
     key_string = json.dumps(key_data, sort_keys=True)
-    return hashlib.sha256(key_string.encode()).hexdigest()
+    return f"{role}_{hashlib.sha256(key_string.encode()).hexdigest()}"
 
 def _calculate_cache_key(content: str, role: str) -> str:
     """Calculate a cache key for the content."""

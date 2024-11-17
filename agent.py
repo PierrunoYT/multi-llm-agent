@@ -45,15 +45,17 @@ class MultiLLMAgent(AsyncContextManager):
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup resources on exit."""
-        try:
-            await asyncio.gather(
-                self.reasoning.cleanup(),
-                self.planner.cleanup(),
-                self.executor.cleanup()
-            )
-        except Exception as e:
-            logger.error("Error during cleanup: %s", str(e))
-            raise
+        errors = []
+        
+        for module in (self.reasoning, self.planner, self.executor):
+            try:
+                await module.cleanup()
+            except Exception as e:
+                errors.append(str(e))
+                logger.error("Error cleaning up %s: %s", module.__class__.__name__, str(e))
+        
+        if errors:
+            raise Exception(f"Cleanup errors occurred: {'; '.join(errors)}")
         
     async def process(self, input_text: str) -> AgentResponse:
         """Process input through all cognitive modules to generate a response."""
@@ -108,10 +110,29 @@ class MultiLLMAgent(AsyncContextManager):
             validated_context = AgentContext(**context)
             self._context = validated_context
             
-            logger.info("Adding context to modules: %s", context)
-            self.reasoning.add_context(context)
-            self.planner.add_context(context)
-            self.executor.add_context(context)
+            sanitized_context = validated_context.dict()
+            logger.info("Adding context to modules: %s", sanitized_context)
+            
+            # Add context to all modules atomically
+            for module in (self.reasoning, self.planner, self.executor):
+                try:
+                    module.add_context(sanitized_context)
+                except Exception as e:
+                    logger.error("Failed to add context to %s: %s", 
+                               module.__class__.__name__, str(e))
+                    # Rollback previous modules
+                    self._rollback_context(sanitized_context)
+                    raise
+                    
         except Exception as e:
             logger.error("Error adding context: %s", str(e))
             raise
+            
+    def _rollback_context(self, context: Dict[str, str]) -> None:
+        """Rollback context changes on error."""
+        for module in (self.reasoning, self.planner, self.executor):
+            try:
+                module.add_context({})  # Reset context
+            except Exception as e:
+                logger.error("Error rolling back context for %s: %s",
+                           module.__class__.__name__, str(e))
