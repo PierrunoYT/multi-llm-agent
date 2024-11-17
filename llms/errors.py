@@ -1,151 +1,94 @@
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
-
-class BaseLLMError(Exception):
-    """Base exception class for LLM module errors."""
+class LLMError(Exception):
+    """Base exception for LLM-related errors."""
     pass
 
-class ReasoningError(BaseLLMError):
-    """Exception raised for errors in the reasoning module."""
+class ValidationError(LLMError):
+    """Exception raised for validation errors."""
     pass
 
-class PlannerError(BaseLLMError):
-    """Exception raised for errors in the planner module."""
+class RateLimitError(LLMError):
+    """Exception raised when rate limits are exceeded."""
     pass
 
-class ExecutorError(BaseLLMError):
-    """Exception raised for errors in the executor module."""
+class APIError(LLMError):
+    """Exception raised for API-related errors."""
+    def __init__(self, message: str, status_code: int = None, response: str = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = response
+
+class CacheError(LLMError):
+    """Exception raised for caching-related errors."""
     pass
 
-class ModerationErrorMetadata(BaseModel):
-    """Metadata for moderation errors from OpenRouter."""
-    reasons: List[str] = Field(description="Why the input was flagged")
-    flagged_input: str = Field(description="The text segment that was flagged (truncated to 100 chars)")
+class ConfigurationError(LLMError):
+    """Exception raised for configuration-related errors."""
+    pass
 
-class OpenRouterError(BaseModel):
-    """OpenRouter API error response model."""
-    code: int = Field(description="HTTP status code for the error")
-    message: str = Field(description="Descriptive error message")
-    metadata: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Additional error metadata, used for moderation errors"
-    )
+class ReasoningError(LLMError):
+    """Exception raised for reasoning module errors."""
+    pass
 
-class ErrorResponse(BaseModel):
-    """Full error response from OpenRouter."""
-    error: OpenRouterError
+class PlannerError(LLMError):
+    """Exception raised for planner module errors."""
+    pass
 
-def handle_openrouter_error(response_data: Dict[str, Any], status_code: Optional[int] = None) -> str:
+class ExecutorError(LLMError):
+    """Exception raised for executor module errors."""
+    pass
+
+class ImageProcessingError(LLMError):
+    """Exception raised for image processing errors."""
+    pass
+
+class RetryError(LLMError):
+    """Exception raised when all retry attempts fail."""
+    def __init__(self, message: str, attempts: int, last_error: Exception = None):
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_error = last_error
+
+class AuthenticationError(APIError):
+    """Exception raised for authentication failures."""
+    pass
+
+class QuotaExceededError(APIError):
+    """Exception raised when API quota is exceeded."""
+    pass
+
+class InvalidRequestError(APIError):
+    """Exception raised for malformed requests."""
+    pass
+
+class ServiceUnavailableError(APIError):
+    """Exception raised when the API service is unavailable."""
+    pass
+
+def raise_for_status_code(status_code: int, response_text: str = None) -> None:
     """
-    Handle OpenRouter API errors and return a user-friendly error message.
+    Raise appropriate exception based on HTTP status code.
     
     Args:
-        response_data: JSON response data from the API
-        status_code: Optional HTTP status code from the response
+        status_code: HTTP status code
+        response_text: Optional response text for error details
         
-    Returns:
-        str: User-friendly error message
+    Raises:
+        Appropriate APIError subclass based on status code
     """
-    # Check if this is a content generation error (status 200 but error in body)
-    is_generation_error = status_code == 200 and "error" in response_data
-    
-    # Parse the error response
-    try:
-        error_response = ErrorResponse(error=response_data.get("error", {}))
-    except Exception:
-        # Fallback for unexpected error format
-        if is_generation_error:
-            return f"Error during content generation: {str(response_data)}"
-        return f"Unexpected error (Status {status_code}): {str(response_data)}"
-    
-    # Get the error code, using response body code for generation errors
-    error_code = error_response.error.code if is_generation_error else (status_code or 500)
-    
-    # Handle specific error codes
-    error_messages = {
-        400: "Invalid request parameters or CORS issue",
-        401: "Invalid API credentials or expired OAuth session",
-        402: "Insufficient credits - please add more credits to continue",
-        403: _format_moderation_error(error_response.error.metadata),
-        408: "Request timed out - the model took too long to respond",
-        429: "Rate limited - please wait before making more requests",
-        502: "Model provider is currently unavailable or returned invalid response",
-        503: "No available model provider meets the routing requirements"
+    error_map = {
+        400: InvalidRequestError("Invalid request", status_code, response_text),
+        401: AuthenticationError("Authentication failed", status_code, response_text),
+        403: AuthenticationError("Permission denied", status_code, response_text),
+        429: QuotaExceededError("Rate limit exceeded", status_code, response_text),
+        500: ServiceUnavailableError("Internal server error", status_code, response_text),
+        502: ServiceUnavailableError("Bad gateway", status_code, response_text),
+        503: ServiceUnavailableError("Service unavailable", status_code, response_text),
+        504: ServiceUnavailableError("Gateway timeout", status_code, response_text)
     }
     
-    base_message = error_messages.get(
-        error_code,
-        "Error during content generation" if is_generation_error else f"Unexpected error (Code {error_code})"
-    )
-    
-    # Add the API's error message if available
-    if error_response.error.message:
-        return f"{base_message}: {error_response.error.message}"
-    return base_message
-
-def _format_moderation_error(metadata: Optional[Dict[str, Any]]) -> str:
-    """Format moderation error with metadata if available."""
-    if not metadata:
-        return "Content was flagged by moderation"
-        
-    try:
-        mod_data = ModerationErrorMetadata(**metadata)
-        reasons = ", ".join(mod_data.reasons)
-        return (
-            f"Content was flagged by moderation for: {reasons}\n"
-            f"Flagged content: {mod_data.flagged_input}"
+    if status_code >= 400:
+        error = error_map.get(
+            status_code,
+            APIError(f"HTTP {status_code} error", status_code, response_text)
         )
-    except Exception:
-        return "Content was flagged by moderation (details unavailable)"
-
-def is_warmup_error(response_data: Dict[str, Any]) -> bool:
-    """
-    Check if the error indicates a model warmup issue.
-    
-    Args:
-        response_data: JSON response data from the API
-        
-    Returns:
-        bool: True if this appears to be a warmup-related error
-    """
-    # Check both error message and status 200 with no content
-    if not response_data.get("error"):
-        return False
-        
-    error_msg = response_data["error"].get("message", "").lower()
-    warmup_indicators = [
-        "warming up",
-        "cold start",
-        "scaling up",
-        "no content generated",
-        "try again",
-        "retry"
-    ]
-    
-    return any(indicator in error_msg for indicator in warmup_indicators)
-
-def should_retry_error(response_data: Dict[str, Any], status_code: Optional[int] = None) -> bool:
-    """
-    Determine if an error should trigger a retry attempt.
-    
-    Args:
-        response_data: JSON response data from the API
-        status_code: Optional HTTP status code from the response
-        
-    Returns:
-        bool: True if the request should be retried
-    """
-    # Always retry warmup errors
-    if is_warmup_error(response_data):
-        return True
-        
-    # Don't retry if no status code (unexpected error)
-    if status_code is None:
-        return False
-        
-    # Don't retry client errors except timeout
-    if status_code < 500 and status_code != 408:
-        return False
-        
-    # Retry server errors
-    return status_code in [502, 503]
+        raise error

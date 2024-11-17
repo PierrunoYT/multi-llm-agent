@@ -1,113 +1,141 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import asyncio
-import logging
-from openai import OpenAI
-import anthropic
+import json
+from abc import ABC, abstractmethod
+from pydantic import BaseModel, ValidationError
 from config import LLMConfig
-from .errors import (
-    handle_openrouter_error,
-    should_retry_error,
-    is_warmup_error,
-    BaseLLMError
-)
-from .cache_control import (
-    create_cacheable_message,
-    should_enable_caching
-)
-from .rate_limiter import with_rate_limit  # Import the rate limiter
+from .errors import LLMError, ValidationError as LLMValidationError
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+class APIResponse(BaseModel):
+    """Validated API response structure."""
+    choices: list
+    model: str
+    usage: Optional[Dict[str, int]]
 
-class BaseLLMModule:
-    """Base class for LLM modules with common functionality."""
+class MessageContent(BaseModel):
+    """Validated message content structure."""
+    content: str
+    role: str
+    tool_calls: Optional[list] = None
+
+class BaseLLMModule(ABC):
+    """Base class for LLM modules with shared functionality."""
     
     def __init__(self, config: LLMConfig):
+        """Initialize the LLM module with configuration."""
         self.config = config
         self.context: Dict[str, str] = {}
         self._validate_config()
-        self.client = self._initialize_client()
-        
-    def _validate_config(self) -> None:
-        """Validate the configuration."""
+    
+    def _validate_config(self):
+        """Validate the module configuration."""
         if not self.config.api_key:
-            raise ValueError("API key is required")
-        if self.config.provider not in ["openai", "openrouter", "anthropic"]:
-            raise ValueError(f"Unsupported provider: {self.config.provider}")
+            raise LLMValidationError("API key is required")
+        if not self.config.model:
+            raise LLMValidationError("Model name is required")
             
-    def _initialize_client(self) -> Any:
-        """Initialize the appropriate client based on provider."""
-        if self.config.provider == "openai":
-            return OpenAI(api_key=self.config.api_key)
-        elif self.config.provider == "openrouter":
-            return OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self.config.api_key,
-                default_headers={
-                    "HTTP-Referer": self.config.extra_config.get("site_url", ""),
-                    "X-Title": self.config.extra_config.get("app_name", "")
-                }
-            )
-        elif self.config.provider == "anthropic":
-            return anthropic.Anthropic(api_key=self.config.api_key)
-        
-    def add_context(self, context: Dict[str, str]) -> None:
-        """Add additional context."""
-        self.context.update(context)
-        
+        # Validate rate limits
+        if hasattr(self.config, 'rate_limit'):
+            if self.config.rate_limit.requests_per_minute < 1:
+                raise LLMValidationError("Requests per minute must be at least 1")
+            if self.config.rate_limit.concurrent_requests < 1:
+                raise LLMValidationError("Concurrent requests must be at least 1")
+    
     async def _make_api_call(
         self,
-        request_kwargs: Dict[str, Any],
+        request_kwargs: dict,
         error_prefix: str,
-        max_retries: int = 2,
+        max_retries: int = 1,
         retry_delay: float = 1.0
     ) -> Any:
-        """Make an API call with retry logic and rate limiting."""
-        async with await with_rate_limit(self.config.provider) as limiter:
-            for attempt in range(max_retries + 1):
-                try:
-                    logger.debug(f"Making API call attempt {attempt + 1}/{max_retries + 1}")
-                    # Use sync client since OpenAI's async client is not working properly
-                    response = self.client.chat.completions.create(**request_kwargs)
-                    
-                    # Check for generation errors
-                    if hasattr(response, "error"):
-                        error_message = handle_openrouter_error(
-                            response_data={"error": response.error},
-                            status_code=200
-                        )
-                        if should_retry_error({"error": response.error}, 200):
-                            await self._handle_retry(attempt, retry_delay, is_warmup=is_warmup_error({"error": response.error}))
-                            continue
-                        raise BaseLLMError(f"{error_prefix}: {error_message}")
-                    
-                    return response
-                    
-                except Exception as e:
-                    status_code = getattr(e, "status_code", None)
-                    response_data = self._extract_error_response(e)
-                    error_message = handle_openrouter_error(response_data, status_code)
-                    
-                    if attempt < max_retries and should_retry_error(response_data, status_code):
-                        await self._handle_retry(attempt, retry_delay, is_warmup=is_warmup_error(response_data))
-                        continue
-                    
-                    raise BaseLLMError(f"{error_prefix}: {error_message}") from e
+        """
+        Make an API call with validation and error handling.
+        
+        Args:
+            request_kwargs: API request parameters
+            error_prefix: Prefix for error messages
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
             
-            raise BaseLLMError(f"{error_prefix}: Maximum retries exceeded")
+        Returns:
+            Validated API response
+            
+        Raises:
+            LLMError: If the API call fails
+        """
+        try:
+            # Validate request parameters
+            self._validate_request_params(request_kwargs)
+            
+            # Make the API call (implementation specific to provider)
+            response = await self._execute_api_call(request_kwargs)
+            
+            # Validate response
+            return self._validate_response(response)
+            
+        except ValidationError as e:
+            raise LLMValidationError(f"{error_prefix}: {str(e)}")
+        except Exception as e:
+            raise LLMError(f"{error_prefix}: {str(e)}")
     
-    async def _handle_retry(self, attempt: int, retry_delay: float, is_warmup: bool = False) -> None:
-        """Handle retry delay with logging."""
-        delay = retry_delay * (attempt + 1) * (2 if is_warmup else 1)
-        logger.info(f"Retrying after {delay:.1f}s (attempt {attempt + 1})")
-        await asyncio.sleep(delay)
+    def _validate_request_params(self, params: dict):
+        """Validate API request parameters."""
+        required_fields = {'messages', 'model'}
+        missing_fields = required_fields - set(params.keys())
+        if missing_fields:
+            raise LLMValidationError(f"Missing required fields: {missing_fields}")
+            
+        # Validate messages structure
+        if not isinstance(params['messages'], list):
+            raise LLMValidationError("Messages must be a list")
+        if not params['messages']:
+            raise LLMValidationError("Messages list cannot be empty")
+            
+        # Validate each message
+        for msg in params['messages']:
+            if not isinstance(msg, dict):
+                raise LLMValidationError("Each message must be a dictionary")
+            if 'role' not in msg or 'content' not in msg:
+                raise LLMValidationError("Messages must have 'role' and 'content'")
     
-    def _extract_error_response(self, error: Exception) -> Dict[str, Any]:
-        """Extract error response data from an exception."""
-        if hasattr(error, "response"):
-            if hasattr(error.response, "json"):
-                return error.response.json()
-            elif isinstance(error.response, dict):
-                return error.response
-        return {}
+    def _validate_response(self, response: Any) -> APIResponse:
+        """Validate API response."""
+        try:
+            if isinstance(response, str):
+                response = json.loads(response)
+                
+            validated = APIResponse(
+                choices=[{'message': MessageContent(**choice['message'])} for choice in response['choices']],
+                model=response['model'],
+                usage=response.get('usage')
+            )
+            
+            # Additional validation
+            if not validated.choices:
+                raise LLMValidationError("Response contains no choices")
+            if not validated.choices[0]['message'].content:
+                raise LLMValidationError("Response message content is empty")
+                
+            return validated
+            
+        except (json.JSONDecodeError, ValidationError) as e:
+            raise LLMValidationError(f"Invalid API response format: {str(e)}")
+    
+    @abstractmethod
+    async def _execute_api_call(self, request_kwargs: dict) -> Any:
+        """
+        Execute the actual API call. Must be implemented by provider-specific classes.
+        
+        Args:
+            request_kwargs: API request parameters
+            
+        Returns:
+            Raw API response
+        """
+        raise NotImplementedError("API call execution not implemented")
+    
+    def add_context(self, context: Dict[str, str]):
+        """Add context for the module."""
+        if not isinstance(context, dict):
+            raise LLMValidationError("Context must be a dictionary")
+        self.context.update(context)

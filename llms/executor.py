@@ -9,6 +9,7 @@ from .cache_control import (
     get_cached_response
 )
 from .errors import ExecutorError
+from .rate_limiter import get_rate_limiter
 
 class ExecutorModule(BaseLLMModule):
     """Module for executing plans and generating specific actions."""
@@ -35,6 +36,10 @@ class ExecutorModule(BaseLLMModule):
         Raises:
             ExecutorError: If execution fails after retries
         """
+        # Validate plan
+        if not plan or not isinstance(plan, list):
+            raise ExecutorError("Invalid plan: Must be a non-empty list of steps")
+        
         cache_enabled = (
             self.config.cache_config.enabled and 
             should_enable_caching(self.config.model)
@@ -69,7 +74,7 @@ class ExecutorModule(BaseLLMModule):
             messages=messages
         )
         if cached_response:
-            return cached_response
+            return self._validate_execution_response(cached_response)
         
         # Prepare request parameters
         request_kwargs = {
@@ -82,14 +87,22 @@ class ExecutorModule(BaseLLMModule):
         }
         
         try:
-            response = await self._make_api_call(
-                request_kwargs=request_kwargs,
-                error_prefix="Execution failed",
-                max_retries=max_retries,
-                retry_delay=retry_delay
-            )
+            # Apply rate limiting
+            rate_limiter = get_rate_limiter()
+            await rate_limiter.acquire(self.config.model)
+            
+            try:
+                response = await self._make_api_call_with_backoff(
+                    request_kwargs=request_kwargs,
+                    error_prefix="Execution failed",
+                    max_retries=max_retries,
+                    retry_delay=retry_delay
+                )
+            finally:
+                await rate_limiter.release(self.config.model)
             
             result = response.choices[0].message.content
+            validated_result = self._validate_execution_response(result)
             
             # Cache the response if appropriate
             if cache_enabled:
@@ -100,10 +113,10 @@ class ExecutorModule(BaseLLMModule):
                     response=result
                 )
             
-            return result
+            return validated_result
             
         except Exception as e:
-            raise ExecutorError(str(e)) from e
+            raise ExecutorError(f"Execution failed: {str(e)}") from e
     
     def _create_execution_prompt(self, plan: List[str], context: str) -> str:
         """Create a detailed prompt for execution."""
@@ -128,3 +141,35 @@ Plan:
 {plan_str}
 
 Generate detailed execution steps or response:"""
+
+    def _validate_execution_response(self, response: str) -> str:
+        """Validate and clean up execution response."""
+        if not response or not isinstance(response, str):
+            raise ExecutorError("Invalid execution response: Must be a non-empty string")
+        
+        # Remove any potential harmful characters or sequences
+        response = response.replace('\x00', '')  # Remove null bytes
+        
+        # Ensure response isn't too short
+        if len(response.strip()) < 10:
+            raise ExecutorError("Invalid execution response: Response too short")
+            
+        return response.strip()
+    
+    async def _make_api_call_with_backoff(self, request_kwargs: dict, error_prefix: str, max_retries: int, retry_delay: float):
+        """Make API call with exponential backoff retry strategy."""
+        for attempt in range(max_retries):
+            try:
+                return await self._make_api_call(
+                    request_kwargs=request_kwargs,
+                    error_prefix=error_prefix,
+                    max_retries=1,  # We handle retries here
+                    retry_delay=0  # No delay in inner retry
+                )
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise
+                
+                # Exponential backoff
+                wait_time = retry_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)

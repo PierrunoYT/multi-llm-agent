@@ -1,89 +1,75 @@
 from typing import Dict, Optional
 import asyncio
 import time
-from dataclasses import dataclass, field
-import logging
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
 
 @dataclass
-class RateLimitConfig:
-    """Configuration for rate limiting."""
-    requests_per_minute: int = 60
-    concurrent_requests: int = 10
-    burst_size: int = 5
+class RateLimit:
+    requests_per_minute: int
+    concurrent_requests: int
 
-@dataclass
 class RateLimiter:
-    """Rate limiter implementation using token bucket algorithm."""
-    config: RateLimitConfig
-    _tokens: float = field(init=False)
-    _last_update: float = field(init=False)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _semaphore: asyncio.Semaphore = field(init=False)
+    """Rate limiter for API requests with concurrent request limiting."""
     
-    def __post_init__(self):
-        self._tokens = float(self.config.burst_size)
-        self._last_update = time.time()
-        self._semaphore = asyncio.Semaphore(self.config.concurrent_requests)
+    def __init__(self, rate_limits: Dict[str, RateLimit]):
+        self._rate_limits = rate_limits
+        self._request_times: Dict[str, list] = {model: [] for model in rate_limits}
+        self._locks: Dict[str, asyncio.Semaphore] = {
+            model: asyncio.Semaphore(limit.concurrent_requests)
+            for model, limit in rate_limits.items()
+        }
     
-    async def acquire(self) -> bool:
-        """
-        Acquire a rate limit token.
-        
-        Returns:
-            bool: True if token acquired, False if rate limited
-        """
-        async with self._lock:
-            now = time.time()
-            time_passed = now - self._last_update
-            self._tokens = min(
-                self.config.burst_size,
-                self._tokens + time_passed * (self.config.requests_per_minute / 60.0)
-            )
-            self._last_update = now
+    async def acquire(self, model: str):
+        """Acquire permission to make a request."""
+        rate_limit = self._rate_limits.get(model)
+        if not rate_limit:
+            return  # No rate limit for this model
             
-            if self._tokens < 1.0:
-                logger.warning("Rate limit exceeded")
-                return False
+        # Wait for concurrent request slot
+        async with self._locks[model]:
+            # Clean old request times
+            current_time = time.time()
+            self._request_times[model] = [
+                t for t in self._request_times[model]
+                if current_time - t < 60  # Keep last minute
+            ]
             
-            self._tokens -= 1.0
-            return True
+            # If at rate limit, wait until we can make another request
+            if len(self._request_times[model]) >= rate_limit.requests_per_minute:
+                wait_time = 60 - (current_time - self._request_times[model][0])
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+            
+            # Add current request
+            self._request_times[model].append(time.time())
     
-    async def __aenter__(self):
-        """Acquire both rate limit token and concurrency semaphore."""
-        while True:
-            if await self.acquire():
-                await self._semaphore.acquire()
-                return self
-            await asyncio.sleep(1.0)  # Wait before retrying
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Release concurrency semaphore."""
-        self._semaphore.release()
+    async def release(self, model: str):
+        """Release the rate limit lock."""
+        if model in self._locks:
+            self._locks[model].release()
 
-# Global rate limiters for different providers
-RATE_LIMITERS: Dict[str, RateLimiter] = {
-    "openai": RateLimiter(RateLimitConfig(
+# Default rate limits for different models
+DEFAULT_RATE_LIMITS = {
+    "openai/o1-preview": RateLimit(
         requests_per_minute=60,
-        concurrent_requests=10,
-        burst_size=5
-    )),
-    "anthropic": RateLimiter(RateLimitConfig(
-        requests_per_minute=120,
-        concurrent_requests=20,
-        burst_size=10
-    )),
-    "openrouter": RateLimiter(RateLimitConfig(
-        requests_per_minute=90,
-        concurrent_requests=15,
-        burst_size=8
-    ))
+        concurrent_requests=5
+    ),
+    "anthropic/claude-3.5-sonnet:beta": RateLimit(
+        requests_per_minute=50,
+        concurrent_requests=3
+    ),
+    "anthropic/claude-3-5-haiku:beta": RateLimit(
+        requests_per_minute=50,
+        concurrent_requests=3
+    )
 }
 
-async def with_rate_limit(provider: str):
-    """Get rate limiter for specific provider."""
-    limiter = RATE_LIMITERS.get(provider)
-    if not limiter:
-        raise ValueError(f"No rate limiter configured for provider: {provider}")
-    return limiter
+# Global rate limiter instance
+_rate_limiter: Optional[RateLimiter] = None
+
+def get_rate_limiter() -> RateLimiter:
+    """Get or create the global rate limiter instance."""
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter(DEFAULT_RATE_LIMITS)
+    return _rate_limiter

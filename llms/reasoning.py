@@ -4,9 +4,13 @@ from config import LLMConfig
 from .base import BaseLLMModule
 from .cache_control import (
     create_cacheable_message,
-    should_enable_caching
+    should_enable_caching,
+    cache_response,
+    get_cached_response
 )
 from .errors import ReasoningError
+from .image_handler import ImageHandler
+from .rate_limiter import get_rate_limiter
 
 class ReasoningModule(BaseLLMModule):
     """Module for deep analysis and reasoning using LLMs."""
@@ -56,22 +60,28 @@ class ReasoningModule(BaseLLMModule):
         
         # Build user message with text and optional images
         if image_paths:
-            content = [{"type": "text", "text": self._create_reasoning_prompt(input_text)}]
-            for img_path in image_paths:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": self._encode_image(img_path)
-                    }
-                })
-            if cache_enabled and self.config.cache_config.cache_user_messages:
-                content[0] = (await create_cacheable_message(
-                    role="user",
-                    content=content[0]["text"],
-                    cache_large_content=True,
-                    min_cache_size=self.config.cache_config.min_cache_size
-                ))["content"][0]
-            messages.append({"role": "user", "content": content})
+            try:
+                content = [{"type": "text", "text": self._create_reasoning_prompt(input_text)}]
+                for img_path in image_paths:
+                    # Process and validate image
+                    encoded_image = ImageHandler.encode_image(img_path)
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": encoded_image
+                        }
+                    })
+                
+                if cache_enabled and self.config.cache_config.cache_user_messages:
+                    content[0] = (await create_cacheable_message(
+                        role="user",
+                        content=content[0]["text"],
+                        cache_large_content=True,
+                        min_cache_size=self.config.cache_config.min_cache_size
+                    ))["content"][0]
+                messages.append({"role": "user", "content": content})
+            except ValueError as e:
+                raise ReasoningError(f"Image processing failed: {str(e)}") from e
         else:
             user_message = await create_cacheable_message(
                 role="user",
@@ -81,11 +91,25 @@ class ReasoningModule(BaseLLMModule):
             )
             messages.append(user_message)
 
+        # Check cache first
+        if not stream:
+            cached_response = await get_cached_response(
+                provider=self.config.provider,
+                model=self.config.model,
+                messages=messages
+            )
+            if cached_response:
+                return cached_response
+
         # Prepare the completion request
         request_kwargs = {
             **self.config.to_request_params(),
             "messages": messages,
-            "stream": stream
+            "stream": stream,
+            "extra_headers": {
+                "HTTP-Referer": self.config.extra_config.get("site_url", ""),
+                "X-Title": self.config.extra_config.get("app_name", "")
+            }
         }
 
         # Add tools if provided and using OpenRouter
@@ -94,34 +118,65 @@ class ReasoningModule(BaseLLMModule):
             request_kwargs["tool_choice"] = "auto"
 
         try:
-            response = await self._make_api_call(
-                request_kwargs=request_kwargs,
-                error_prefix="Analysis failed",
-                max_retries=max_retries,
-                retry_delay=retry_delay
-            )
+            # Apply rate limiting
+            rate_limiter = get_rate_limiter()
+            await rate_limiter.acquire(self.config.model)
+            
+            try:
+                response = await self._make_api_call_with_backoff(
+                    request_kwargs=request_kwargs,
+                    error_prefix="Analysis failed",
+                    max_retries=max_retries,
+                    retry_delay=retry_delay
+                )
+            finally:
+                await rate_limiter.release(self.config.model)
             
             if stream:
                 return response
+            
+            result = response.choices[0].message.content
+            
+            # Cache the response if appropriate
+            if cache_enabled:
+                await cache_response(
+                    provider=self.config.provider,
+                    model=self.config.model,
+                    messages=messages,
+                    response=result
+                )
             
             # Handle tool calls if present
             if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
                 return {
                     'tool_calls': response.choices[0].message.tool_calls,
-                    'content': response.choices[0].message.content
+                    'content': result
                 }
             
-            return response.choices[0].message.content
+            return result
             
         except Exception as e:
-            raise ReasoningError(str(e)) from e
+            raise ReasoningError(f"Analysis failed: {str(e)}") from e
             
     def _create_reasoning_prompt(self, input_text: str) -> str:
         """Create the reasoning prompt with context."""
         context_str = "\n".join(f"{k}: {v}" for k, v in self.context.items())
         return f"Context:\n{context_str}\n\nAnalyze this: {input_text}"
-        
-    def _encode_image(self, image_path: str) -> str:
-        """Encode image for API request."""
-        # Implementation depends on your image handling needs
-        raise NotImplementedError("Image encoding not implemented")
+    
+    async def _make_api_call_with_backoff(self, request_kwargs: dict, error_prefix: str, max_retries: int, retry_delay: float):
+        """Make API call with exponential backoff retry strategy."""
+        for attempt in range(max_retries):
+            try:
+                return await self._make_api_call(
+                    request_kwargs=request_kwargs,
+                    error_prefix=error_prefix,
+                    max_retries=1,  # We handle retries here
+                    retry_delay=0  # No delay in inner retry
+                )
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise
+                
+                # Exponential backoff
+                wait_time = retry_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)
