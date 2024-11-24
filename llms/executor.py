@@ -102,7 +102,7 @@ class ExecutorModule(BaseLLMModule):
             finally:
                 await rate_limiter.release(self.config.model)
             
-            result = response.choices[0].message.content
+            result = response.choices[0]['message'].content
             validated_result = self._validate_execution_response(result)
             
             # Cache the response if appropriate

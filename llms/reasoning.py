@@ -136,7 +136,8 @@ class ReasoningModule(BaseLLMModule):
             if stream:
                 return response
             
-            result = response.choices[0].message.content
+            # Access the message content correctly from the validated response structure
+            result = response.choices[0]['message'].content
             
             # Cache the response if appropriate
             if cache_enabled:
@@ -148,9 +149,9 @@ class ReasoningModule(BaseLLMModule):
                 )
             
             # Handle tool calls if present
-            if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+            if hasattr(response.choices[0]['message'], 'tool_calls') and response.choices[0]['message'].tool_calls:
                 return {
-                    'tool_calls': response.choices[0].message.tool_calls,
+                    'tool_calls': response.choices[0]['message'].tool_calls,
                     'content': result
                 }
             

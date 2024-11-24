@@ -98,7 +98,7 @@ class PlannerModule(BaseLLMModule):
             finally:
                 await rate_limiter.release(self.config.model)
             
-            result = response.choices[0].message.content
+            result = response.choices[0]['message'].content
             
             # Cache the response if appropriate
             if cache_enabled:
