@@ -132,8 +132,8 @@ with col1:
                     })
                     save_history(st.session_state.history)
                     
-                    # Reset form
-                    st.experimental_rerun()
+                    # Reset form using st.rerun()
+                    st.rerun()
                     
                 except Exception as e:
                     st.error(f"Error processing task: {str(e)}")
